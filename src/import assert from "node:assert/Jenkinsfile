@@ -1,0 +1,113 @@
+pipeline {
+  agent any
+
+  environment {
+    NODE_VERSION = '20'
+    // Optional: set these in Jenkins Credentials (kind: Username/Password or Secret Text)
+    DOCKER_REGISTRY = credentials('docker-registry-cred-id') // username:pwd
+    DOCKER_IMAGE = "your-docker-namespace/jenkins-pipeline-starter"
+    GIT_CRED = 'git-cred-id' // if your repo needs auth
+  }
+
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    ansiColor('xterm')
+  }
+
+  triggers {
+    // Uncomment if you want periodic builds:
+    // cron('H/15 * * * *')
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        script {
+          checkout([
+            $class: 'GitSCM',
+            branches: [[name: env.BRANCH_NAME ?: '*/main']],
+            userRemoteConfigs: [[
+              url: env.GIT_URL ?: scm.getUserRemoteConfigs()[0].getUrl(),
+              credentialsId: env.GIT_CRED
+            ]]
+          ])
+        }
+      }
+    }
+
+    stage('Set up Node') {
+      steps {
+        sh """
+          if ! command -v node >/dev/null 2>&1; then
+            echo "Using Node via nvm-like setup not found; falling back to system node"
+          else
+            node -v
+          fi
+        """
+      }
+    }
+
+    stage('Install') {
+      steps {
+        sh 'npm ci || npm install'
+      }
+    }
+
+    stage('Lint') {
+      steps {
+        sh 'npm run lint'
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh 'npm test -- --reporter tap | tee test-results.tap || true'
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'test-results.tap', fingerprint: true, allowEmptyArchive: true
+        }
+        unsuccessful {
+          echo 'Tests failed'
+          error('Failing build due to test failures')
+        }
+      }
+    }
+
+    stage('Build Docker') {
+      when { expression { return fileExists('Dockerfile') } }
+      steps {
+        script {
+          sh """
+            echo "$DOCKER_REGISTRY_PSW" | docker login -u "$DOCKER_REGISTRY_USR" --password-stdin
+            docker build -t ${DOCKER_IMAGE}:${env.BUILD_NUMBER} .
+            docker tag ${DOCKER_IMAGE}:${env.BUILD_NUMBER} ${DOCKER_IMAGE}:latest
+            docker push ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+            docker push ${DOCKER_IMAGE}:latest
+          """
+        }
+      }
+    }
+
+    stage('Deploy') {
+      when { expression { return env.DEPLOY_HOST?.trim() } }
+      steps {
+        // Example placeholder: replace with kubectl, docker compose, or SSH deploy.
+        sh 'echo "Deploy step here (kubectl/ssh/docker-compose)..."'
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Build OK: ${env.BUILD_TAG}"
+    }
+    failure {
+      echo "Build FAILED: ${env.BUILD_TAG}"
+    }
+    always {
+      cleanWs()
+    }
+  }
+}
